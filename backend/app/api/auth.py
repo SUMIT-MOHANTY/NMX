@@ -1,53 +1,85 @@
-from datetime import datetime
-import logging
-from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy.orm import Session
-from backend.app.schemas.auth import UserRegister, UserResponse
-from backend.app.services.auth import AuthService
-from backend.app.db.session import get_db
+from datetime import timedelta
+from typing import Any
 
-router = APIRouter(prefix="/api/auth", tags=["authentication"])
+from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordRequestForm
+from pydantic import BaseModel
+import logging
+
+from ..core.security import create_access_token, verify_password
+from ..core.config import settings
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-@router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
-def register_user(user_data: UserRegister, db: Session = Depends(get_db)):
-    """
-    Register a new user.
+# Mock user database - replace with actual database in production
+MOCK_USER_DB = {
+    "testuser@example.com": {
+        "email": "testuser@example.com",
+        "hashed_password": "$2b$12$EixZaYVK1fsbw1ZfbX3OXePaWxn96p36WQoeG6Lruj3vjPGga31lW",  # "password"
+        "is_active": True,
+    }
+}
 
-    This endpoint validates the user data, creates a new user record
-    with a securely hashed password, and returns the created user.
+router = APIRouter()
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class LoginRequest(BaseModel):
+    username: str  # Using username to maintain OAuth2 compatibility (can be email)
+    password: str
+
+@router.post("/login", response_model=Token, status_code=status.HTTP_200_OK)
+async def login_access_token(form_data: OAuth2PasswordRequestForm = Depends()) -> Any:
+    """
+    OAuth2 compatible token login, get an access token for future requests
     """
     try:
-        logger.info(f"Registration attempt for email: {user_data.email}")
-        new_user = AuthService.register_user(db, user_data)
-
-        # Convert the user object to a response
-        return {
-            "id": str(new_user.id),
-            "full_name": new_user.full_name,
-            "email": new_user.email,
-            "mobile": new_user.mobile,
-            "created_at": new_user.created_at
-        }
-
-    except ValueError as e:
-        error_message = str(e)
-        if "Email already registered" in error_message:
-            logger.warning(f"Registration failed - email already exists: {user_data.email}")
+        # Authenticate the user
+        user = MOCK_USER_DB.get(form_data.username)
+        if not user:
+            logger.warning(f"Login attempt failed for non-existent user: {form_data.username}")
             raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Email already registered"
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
             )
-        else:
-            logger.warning(f"Registration failed - validation error: {error_message}")
+
+        if not verify_password(form_data.password, user["hashed_password"]):
+            logger.warning(f"Invalid password attempt for user: {form_data.username}")
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+
+        if not user["is_active"]:
+            logger.warning(f"Login attempt by inactive user: {form_data.username}")
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=error_message
+                detail="Inactive user"
             )
 
+        # Create access token
+        access_token_expires = timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+        token = create_access_token(
+            subject=user["email"], expires_delta=access_token_expires
+        )
+
+        logger.info(f"User successfully logged in: {form_data.username}")
+        return {
+            "access_token": token,
+            "token_type": "bearer"
+        }
+    except HTTPException:
+        # Re-raise HTTP exceptions to maintain status codes
+        raise
     except Exception as e:
-        logger.error(f"Unexpected error during registration: {str(e)}")
+        logger.error(f"Unexpected error during login: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An unexpected error occurred. Please try again later."
+            detail="Internal server error",
         )

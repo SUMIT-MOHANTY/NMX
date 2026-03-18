@@ -1,56 +1,80 @@
+from datetime import timedelta
+from typing import Optional
 import logging
-from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError
-from backend.app.models.user import User
-from backend.app.schemas.auth import UserRegister
 
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from jose import JWTError, jwt
+from sqlalchemy.orm import Session
+
+from app.core.security import verify_password, create_access_token, SECRET_KEY, ALGORITHM
+from app.models.user import User
+from app.schemas.auth import TokenPayload
+from app.db.session import get_db
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-class AuthService:
-    @staticmethod
-    def register_user(db: Session, user_data: UserRegister):
-        """
-        Register a new user in the system.
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login")
 
-        Args:
-            db: Database session
-            user_data: Validated user registration data
+def authenticate_user(db: Session, email: str, password: str) -> Optional[User]:
+    """Authenticate a user by email and password"""
+    try:
+        user = User.get_by_email(db, email=email)
+        if not user:
+            logger.warning(f"Authentication failed: User not found for email {email}")
+            return None
+        if not verify_password(password, user.hashed_password):
+            logger.warning(f"Authentication failed: Invalid password for user {email}")
+            return None
+        return user
+    except Exception as e:
+        logger.error(f"Authentication error: {e}")
+        return None
 
-        Returns:
-            Newly created user object or None if registration fails
+def create_user_token(user_id: int) -> dict:
+    """Create token for user"""
+    try:
+        access_token_expires = timedelta(minutes=30)
+        access_token = create_access_token(
+            subject=user_id, expires_delta=access_token_expires
+        )
+        return {"access_token": access_token, "token_type": "bearer"}
+    except Exception as e:
+        logger.error(f"Token generation error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Could not create access token"
+        )
 
-        Raises:
-            ValueError: If email is already registered
-        """
-        try:
-            # Check if email already exists
-            existing_user = db.query(User).filter(User.email == user_data.email).first()
-            if existing_user:
-                logger.warning(f"Registration attempt with existing email: {user_data.email}")
-                raise ValueError("Email already registered")
+async def get_current_user(
+    db: Session = Depends(get_db),
+    token: str = Depends(oauth2_scheme)
+) -> User:
+    """Get current user from JWT token"""
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("sub")
+        if user_id is None:
+            logger.warning("Missing user_id in token payload")
+            raise credentials_exception
+        token_data = TokenPayload(sub=int(user_id))
+    except JWTError as e:
+        logger.error(f"JWT validation error: {e}")
+        raise credentials_exception
 
-            # Create new user
-            new_user = User(
-                full_name=user_data.full_name,
-                email=user_data.email,
-                mobile=user_data.mobile,
-                role="user"
-            )
-            new_user.set_password(user_data.password)
+    user = db.query(User).filter(User.id == token_data.sub).first()
+    if user is None:
+        logger.warning(f"User not found for id {token_data.sub}")
+        raise credentials_exception
+    if not user.is_active:
+        logger.warning(f"Inactive user attempted login: {user.email}")
+        raise HTTPException(status_code=400, detail="Inactive user")
 
-            # Save to database
-            db.add(new_user)
-            db.commit()
-            db.refresh(new_user)
-
-            logger.info(f"New user registered successfully: {new_user.id}")
-            return new_user
-
-        except IntegrityError as e:
-            db.rollback()
-            logger.error(f"Database integrity error during registration: {str(e)}")
-            raise ValueError("Email already registered")
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Unexpected error during user registration: {str(e)}")
-            raise
+    return user

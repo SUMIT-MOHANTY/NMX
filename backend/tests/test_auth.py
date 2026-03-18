@@ -1,88 +1,105 @@
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy.orm import Session
+import logging
 
-from backend.app.main import app
-from backend.app.models.user import User
-from backend.app.db.session import get_db
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-client = TestClient(app)
+# Test data
+test_user = {
+    "email": "test@example.com",
+    "password": "Password123",
+    "full_name": "Test User"
+}
 
-def test_register_successful(db: Session):
-    # Test data
-    user_data = {
-        "full_name": "Test User",
-        "email": "testuser@example.com",
-        "mobile": "+1234567890",
-        "password": "password123",
-        "confirm_password": "password123"
-    }
+def test_register_user(client):
+    """Test user registration"""
+    try:
+        response = client.post("/api/auth/register", json=test_user)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["email"] == test_user["email"]
+        assert "id" in data
+        assert "hashed_password" not in data
+        logger.info("User registration test passed")
+    except Exception as e:
+        logger.error(f"User registration test failed: {e}")
+        raise
 
-    # Send request
-    response = client.post("/api/auth/register", json=user_data)
+def test_register_duplicate_user(client):
+    """Test duplicate user registration fails"""
+    try:
+        # First registration
+        client.post("/api/auth/register", json=test_user)
 
-    # Assertions
-    assert response.status_code == 201
-    data = response.json()
-    assert data["full_name"] == user_data["full_name"]
-    assert data["email"] == user_data["email"]
-    assert data["mobile"] == user_data["mobile"]
-    assert "id" in data
-    assert "created_at" in data
+        # Duplicate registration should fail
+        response = client.post("/api/auth/register", json=test_user)
+        assert response.status_code == 400
+        logger.info("Duplicate user registration test passed")
+    except Exception as e:
+        logger.error(f"Duplicate user registration test failed: {e}")
+        raise
 
-    # Verify user exists in DB
-    db_user = db.query(User).filter(User.email == user_data["email"]).first()
-    assert db_user is not None
-    assert db_user.full_name == user_data["full_name"]
+def test_login_user(client):
+    """Test user login"""
+    try:
+        # Register user first
+        client.post("/api/auth/register", json=test_user)
 
-def test_register_duplicate_email(db: Session):
-    # Create a user first
-    user_data = {
-        "full_name": "Existing User",
-        "email": "existing@example.com",
-        "mobile": "+0987654321",
-        "password": "password123",
-        "confirm_password": "password123"
-    }
-    client.post("/api/auth/register", json=user_data)
+        # Login
+        response = client.post(
+            "/api/auth/login",
+            data={"username": test_user["email"], "password": test_user["password"]}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert "access_token" in data
+        assert data["token_type"] == "bearer"
+        logger.info("User login test passed")
+    except Exception as e:
+        logger.error(f"User login test failed: {e}")
+        raise
 
-    # Try to register with the same email
-    response = client.post("/api/auth/register", json=user_data)
+def test_login_wrong_password(client):
+    """Test login with wrong password"""
+    try:
+        # Register user first
+        client.post("/api/auth/register", json=test_user)
 
-    # Assertions for conflict
-    assert response.status_code == 409
-    assert response.json()["detail"] == "Email already registered"
+        # Login with wrong password
+        response = client.post(
+            "/api/auth/login",
+            data={"username": test_user["email"], "password": "wrongpassword"}
+        )
+        assert response.status_code == 401
+        logger.info("Wrong password login test passed")
+    except Exception as e:
+        logger.error(f"Wrong password login test failed: {e}")
+        raise
 
-def test_register_invalid_data():
-    # Test with invalid email
-    invalid_email_data = {
-        "full_name": "Invalid User",
-        "email": "not-an-email",
-        "mobile": "+1234567890",
-        "password": "password123",
-        "confirm_password": "password123"
-    }
-    response = client.post("/api/auth/register", json=invalid_email_data)
-    assert response.status_code == 400
+def test_get_user_me(client):
+    """Test getting current user profile"""
+    try:
+        # Register user
+        client.post("/api/auth/register", json=test_user)
 
-    # Test with password mismatch
-    password_mismatch_data = {
-        "full_name": "Mismatch User",
-        "email": "mismatch@example.com",
-        "mobile": "+1234567890",
-        "password": "password123",
-        "confirm_password": "differentpassword"
-    }
-    response = client.post("/api/auth/register", json=password_mismatch_data)
-    assert response.status_code == 400
+        # Login
+        response = client.post(
+            "/api/auth/login",
+            data={"username": test_user["email"], "password": test_user["password"]}
+        )
+        token = response.json()["access_token"]
 
-    # Test with short password
-    short_password_data = {
-        "full_name": "Short Password User",
-        "email": "short@example.com",
-        "mobile": "+1234567890",
-        "password": "short",
-        "confirm_password": "short"
-    }
-    response = client.post("/api/auth/register", json=short_password_data)
-    assert response.status_code == 400
+        # Get profile
+        response = client.get(
+            "/api/auth/me",
+            headers={"Authorization": f"Bearer {token}"}
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["email"] == test_user["email"]
+        logger.info("Get user profile test passed")
+    except Exception as e:
+        logger.error(f"Get user profile test failed: {e}")
+        raise

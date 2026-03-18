@@ -1,29 +1,46 @@
+from sqlalchemy import Boolean, Column, Integer, String, DateTime
+from sqlalchemy.sql import func
 import uuid
-from datetime import datetime
-from sqlalchemy import Column, String, DateTime
-from sqlalchemy.dialects.postgresql import UUID
-import bcrypt
-from backend.app.db.session import Base
+from typing import Optional
+import logging
+
+from app.db.base_class import Base
+
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 class User(Base):
     __tablename__ = "users"
 
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    full_name = Column(String(120), nullable=False)
-    email = Column(String(120), nullable=False, unique=True, index=True)
-    mobile = Column(String(20), nullable=False)
-    password_hash = Column(String(255), nullable=False)
-    role = Column(String(20), nullable=False, default="user")
-    created_at = Column(DateTime, default=datetime.utcnow)
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True, nullable=False)
+    hashed_password = Column(String, nullable=False)
+    full_name = Column(String, nullable=True)
+    is_active = Column(Boolean(), default=True)
+    is_superuser = Column(Boolean(), default=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
-    def set_password(self, password):
-        """Hash and set the password."""
-        password_bytes = password.encode('utf-8')
-        salt = bcrypt.gensalt()
-        self.password_hash = bcrypt.hashpw(password_bytes, salt).decode('utf-8')
+    @classmethod
+    def get_by_email(cls, db_session, email: str) -> Optional["User"]:
+        """Get user by email with error handling."""
+        try:
+            return db_session.query(cls).filter(cls.email == email).first()
+        except Exception as e:
+            logger.error(f"Database error when getting user by email: {e}")
+            return None
 
-    def verify_password(self, password):
-        """Check if the provided password matches the stored hash."""
-        password_bytes = password.encode('utf-8')
-        hash_bytes = self.password_hash.encode('utf-8')
-        return bcrypt.checkpw(password_bytes, hash_bytes)
+    @classmethod
+    def create(cls, db_session, **kwargs) -> Optional["User"]:
+        """Create new user with error handling."""
+        try:
+            db_obj = cls(**kwargs)
+            db_session.add(db_obj)
+            db_session.commit()
+            db_session.refresh(db_obj)
+            return db_obj
+        except Exception as e:
+            db_session.rollback()
+            logger.error(f"Database error when creating user: {e}")
+            return None

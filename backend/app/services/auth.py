@@ -1,56 +1,64 @@
-import logging
-from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError
+from datetime import datetime, timedelta
+from typing import Optional
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from fastapi import HTTPException, status
+
 from backend.app.models.user import User
-from backend.app.schemas.auth import UserRegister
+from backend.app.schemas.user import UserCreate, UserResponse
+from backend.app.core.config import settings
 
-logger = logging.getLogger(__name__)
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-class AuthService:
-    @staticmethod
-    def register_user(db: Session, user_data: UserRegister):
-        """
-        Register a new user in the system.
+def verify_password(plain_password, hashed_password):
+    return pwd_context.verify(plain_password, hashed_password)
 
-        Args:
-            db: Database session
-            user_data: Validated user registration data
+def get_password_hash(password):
+    return pwd_context.hash(password)
 
-        Returns:
-            Newly created user object or None if registration fails
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None):
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.utcnow() + expires_delta
+    else:
+        expire = datetime.utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return encoded_jwt
 
-        Raises:
-            ValueError: If email is already registered
-        """
-        try:
-            # Check if email already exists
-            existing_user = db.query(User).filter(User.email == user_data.email).first()
-            if existing_user:
-                logger.warning(f"Registration attempt with existing email: {user_data.email}")
-                raise ValueError("Email already registered")
+async def get_user_by_email(db: AsyncSession, email: str) -> Optional[User]:
+    result = await db.execute(select(User).where(User.email == email))
+    return result.scalars().first()
 
-            # Create new user
-            new_user = User(
-                full_name=user_data.full_name,
-                email=user_data.email,
-                mobile=user_data.mobile,
-                role="user"
-            )
-            new_user.set_password(user_data.password)
+async def register_user(db: AsyncSession, user_data: UserCreate) -> UserResponse:
+    # Check if email already exists
+    existing_user = await get_user_by_email(db, user_data.email)
+    if existing_user:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Email already registered"
+        )
 
-            # Save to database
-            db.add(new_user)
-            db.commit()
-            db.refresh(new_user)
+    # Create user with hashed password
+    hashed_password = get_password_hash(user_data.password)
+    db_user = User(
+        full_name=user_data.full_name,
+        email=user_data.email,
+        mobile=user_data.mobile,
+        hashed_password=hashed_password
+    )
 
-            logger.info(f"New user registered successfully: {new_user.id}")
-            return new_user
+    db.add(db_user)
+    await db.commit()
+    await db.refresh(db_user)
 
-        except IntegrityError as e:
-            db.rollback()
-            logger.error(f"Database integrity error during registration: {str(e)}")
-            raise ValueError("Email already registered")
-        except Exception as e:
-            db.rollback()
-            logger.error(f"Unexpected error during user registration: {str(e)}")
-            raise
+    # Return user response without password
+    return UserResponse(
+        id=db_user.id,
+        full_name=db_user.full_name,
+        email=db_user.email,
+        mobile=db_user.mobile,
+        created_at=db_user.created_at
+    )
